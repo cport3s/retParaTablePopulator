@@ -1,0 +1,115 @@
+#encoding=utf-8
+# RET DB Populator
+''' 2020-04-17: Initial release
+	2020-06-02: Updated Server IP Address
+	2020-12-14: Fixed bug when RET was unavailable, the script crashed. Change DB population strategy.
+	2021-01-27: Fixed bug when there was no RET configured on BTS.
+'''
+
+# ----------------------------------------------------------VARIABLES----------------------------------------------------------#
+bscserverip = '172.16.121.41'
+dbuser = 'sitedb'
+dbpassword = 'BSCAltice.123'
+retDeviceNo = []
+retDeviceName = []
+retSRN = []
+retVendor = []
+retSerial = []
+retTilt = []
+retAntennaModel = []
+retMaxTilt = []
+retMinTilt = []
+
+# ----------------------------------------------------------FUNCTIONS----------------------------------------------------------#
+def retParaDbUpdate(ne, retDeviceNo, retDeviceName, retSRN, retVendor, retSerial, retTilt, retAntennaModel, retMaxTilt, retMinTilt)
+	query = "REPLACE INTO alticedr_sitedb.retpara (`sitename`, `deviceno`, `devicename`, `subrack`, `manufacturer`, `serial`, `tilt`, `antmodel`, `antmaxtilt`, `antmintilt`) VALUES "
+	Print(StrfTime("%Y%m%d:%H%M%S:") + 'Connected! Populating Site ' + ne)
+	for i in range(len(retDeviceNo))
+		query += "('" + ne + "', " + retDeviceNo[i] + ", '" + retDeviceName[i] + "', " + retSRN[i] + ", '" + retVendor[i] + "', '" + retSerial[i] + "', '" + retTilt[i] + "', '" + retAntennaModel[i] + "', " + retMaxTilt[i] + ", " + retMinTilt[i] + ")"
+		# Check when you get to the last line
+		if i < len(retDeviceNo) - 1
+			query += ", "
+		else
+			query += ";"
+		end
+	end
+	ExecuteCmd(ssh, query)
+	Print(StrfTime("%Y%m%d:%H%M%S:") + query)
+end
+
+# -----------------------------------------------------------MAINCODE----------------------------------------------------------#
+# Get NE list by type
+NEList = GetNELstByType('BTS3900') + GetNELstByType('BTS5900') + GetNELstByType('BTS3900 LTE') + GetNELstByType('BTS3900 WCDMA')
+NEList.sort()
+# Open the connection
+ssh = OpenSSH(bscserverip, dbuser, dbpassword)
+if IsConnected(ssh) == True
+	Print(StrfTime("%Y%m%d:%H%M%S:") + 'ssh connection success')
+	# Connect to the DB
+	ExecuteCmd(ssh, 'mysql -u ' + dbuser + ' -p' + dbpassword + ' alticedr_sitedb')
+	# Loop through the NE list
+	for ne in NEList
+		# Check if NE is online before connecting
+		if GetNEStatus(ne) == 1
+			Print(StrfTime("%Y%m%d:%H%M%S:") + ne + ' is online')
+			# Connect to the NE on loop
+			ConnectNE(ne)
+			Print(StrfTime("%Y%m%d:%H%M%S:") + 'Connected to ' + ne)
+			ClearMMLBuffer()
+			@LST RET:;
+			# Cycle through all RET Report. Must always do this in case there are more than 1 report.
+			retReportList = GetAllMMLReport()
+			for report in retReportList
+				# Parse current report
+				reportParsed = ParseMMLRpt(report)
+				# Make sure there are RET configured on the current report.
+				if GetRecordNum(reportParsed, 0) > 0
+					# Get all data by columns
+					retDeviceNo = GetColumnByName(reportParsed,0,'Device No.',1)
+					retDeviceName = GetColumnByName(reportParsed,0,'Device Name',1)
+					retSRN = GetColumnByName(reportParsed,0,'Control Port Subrack No.',1)
+					retVendor = GetColumnByName(reportParsed,0,'Vendor Code',1)
+					retSerial = GetColumnByName(reportParsed,0,'Serial No.',1)
+					for device in retDeviceNo
+						ClearMMLBuffer()
+						SendMML('DSP RETSUBUNIT:DEVICENO=' + device + ';')
+						retSubUnitParsed = ParseMMLRpt(GetMMLReport(0))
+						retTilt.append(GetAttrValueByIdx(retSubUnitParsed, 0, 5, 0))
+					# End device number loop
+					end
+				end
+			# End report loop
+			end
+			# Now to get the Ret Device Data
+			ClearMMLBuffer()
+			@DSP RETDEVICEDATA:;
+			retDevReportList = GetAllMMLReport()
+			# Check if there's no unavailable RET devices
+			retDevRecordNum = GetRecordNum(ParseMMLRpt(retDevReportList[0]), 0)
+			# If there's any RET Device unavailable, site RET info won't be populated on DB Table
+			if retDevRecordNum != 0
+				for report in retDevReportList
+					reportParsed = ParseMMLRpt(report)
+					retAntennaModel = GetColumnByName(reportParsed,0,'Antenna Model Number',1)
+					retMaxTilt = GetColumnByName(reportParsed,0,'Max Tilt(0.1degree)',1)
+					retMinTilt = GetColumnByName(reportParsed,0,'Min Tilt(0.1degree)',1)
+				# End of ret device data loop
+				end
+				retParaDbUpdate(ne, retDeviceNo, retDeviceName, retSRN, retVendor, retSerial, retTilt, retAntennaModel, retMaxTilt, retMinTilt)
+				#for i in range(len(retDeviceNo))
+				# retParaDbUpdate(ne, retDeviceNo[i], retDeviceName[i], retSRN[i], retVendor[i], retSerial[i], retTilt[i], retAntennaModel[i], retMaxTilt[i], retMinTilt[i])
+				## End function calling loop
+				#end
+			end
+		# If NE is offline....
+		else
+			Print(StrfTime("%Y%m%d:%H%M%S:") + ne + " is offline.")
+		end
+	end
+else
+	Print(StrfTime("%Y%m%d:%H%M%S:") + 'ssh connection failed')
+end
+# Close the connection.
+CloseSSH(ssh)
+Print(StrfTime("%Y%m%d:%H%M%S:") + 'ssh connection closed')
+Print("Finished!")
